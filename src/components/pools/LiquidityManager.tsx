@@ -2,8 +2,8 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'next/navigation'
-import { useAccount, useBalance, useWriteContract, useWaitForTransactionReceipt, useReadContracts, usePublicClient } from 'wagmi'
-import { BaseError, parseUnits, formatUnits } from 'viem'
+import { useAccount, useBalance, useWriteContract, useWaitForTransactionReceipt, useReadContracts, usePublicClient, useSignTypedData } from 'wagmi'
+import { BaseError, parseUnits, formatUnits, encodeFunctionData, parseSignature } from 'viem'
 import { ChevronDown, Clock, CheckCircle, AlertCircle, ArrowUpDown, Info } from 'lucide-react'
 import { TOKENS, CONTRACTS, FEE_TIERS, getTokenByAddress, isNativeTokenAddress, toChainTokenAddress } from '@/lib/constants'
 import { cn, formatTokenAmount, parseInputAmount, shortenAddress } from '@/lib/utils'
@@ -27,6 +27,9 @@ type ContractWriteParams = {
 }
 
 const GAS_LIMIT_CAP = 16_000_000n
+const SELF_PERMIT_IF_NECESSARY_SELECTOR = '0xc2e3140a'
+// 稳定性优先：流动性路径固定只走 approve，不走 permit 子调用
+const ENABLE_PERMIT_LIQUIDITY = false
 const WETH_ABI = [
   {
     type: 'function',
@@ -34,6 +37,33 @@ const WETH_ABI = [
     stateMutability: 'payable',
     inputs: [],
     outputs: [],
+  },
+] as const
+
+const ERC20_PERMIT_ABI = [
+  {
+    type: 'function',
+    name: 'nonces',
+    stateMutability: 'view',
+    inputs: [{ name: 'owner', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'DOMAIN_SEPARATOR',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'bytes32' }],
+  },
+] as const
+
+const EIP712_VERSION_ABI = [
+  {
+    type: 'function',
+    name: 'version',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'string' }],
   },
 ] as const
 
@@ -105,9 +135,14 @@ export default function LiquidityManager() {
   const [searchError, setSearchError] = useState<string | null>(null)
   const [transactionAction, setTransactionAction] = useState<TransactionAction | null>(null)
   const [transactionError, setTransactionError] = useState<string | null>(null)
+  const [permitSupportMap, setPermitSupportMap] = useState<Record<string, boolean>>({})
 
   // 合约交互
+  const { signTypedDataAsync } = useSignTypedData()
   const { writeContract, data: hash, isPending } = useWriteContract()
+  const isSelfPermitIfNecessaryCalldata = useCallback((calldata: `0x${string}`) => {
+    return calldata.slice(0, 10).toLowerCase() === SELF_PERMIT_IF_NECESSARY_SELECTOR
+  }, [])
   const getErrorMessage = useCallback((error: unknown) => {
     if (error instanceof BaseError) {
       return error.shortMessage || error.message
@@ -160,6 +195,33 @@ export default function LiquidityManager() {
   const { isLoading: isConfirming, isSuccess: isConfirmed } = useWaitForTransactionReceipt({
     hash,
   })
+
+  const writeMetaNodeManagerMulticall = useCallback(async (calldatas: `0x${string}`[]) => {
+    try {
+      await writeContractWithEstimatedGas({
+        address: CONTRACTS.META_NODE_MANAGER as `0x${string}`,
+        abi: contractConfig.metaNodeManager.abi,
+        functionName: 'multicall',
+        args: [calldatas],
+      })
+      return
+    } catch (error) {
+      // permit 失败时尝试降级为不带 permit 的 multicall，避免整包失败
+      const hasPermitCall = calldatas.some(isSelfPermitIfNecessaryCalldata)
+      if (!hasPermitCall) throw error
+
+      const fallbackCalldatas = calldatas.filter((data) => !isSelfPermitIfNecessaryCalldata(data))
+      if (fallbackCalldatas.length === 0) throw error
+
+      console.warn('Permit multicall 失败，回退为不带 permit 的调用重试')
+      await writeContractWithEstimatedGas({
+        address: CONTRACTS.META_NODE_MANAGER as `0x${string}`,
+        abi: contractConfig.metaNodeManager.abi,
+        functionName: 'multicall',
+        args: [fallbackCalldatas],
+      })
+    }
+  }, [isSelfPermitIfNecessaryCalldata, writeContractWithEstimatedGas])
 
   // 处理 URL 参数（用于预填充）
   const paramToken0 = searchParams.get('token0') as `0x${string}`
@@ -232,6 +294,61 @@ export default function LiquidityManager() {
       if (known) setToken1(known)
     }
   }, [selectedToken1Address, token1Data, resolveKnownToken])
+
+  const detectPermitSupport = useCallback(async (tokenAddress: string) => {
+    if (!publicClient) return false
+    try {
+      const owner = (address ?? '0x0000000000000000000000000000000000000000') as `0x${string}`
+      await publicClient.readContract({
+        address: tokenAddress as `0x${string}`,
+        abi: ERC20_PERMIT_ABI,
+        functionName: 'nonces',
+        args: [owner],
+      })
+      await publicClient.readContract({
+        address: tokenAddress as `0x${string}`,
+        abi: ERC20_PERMIT_ABI,
+        functionName: 'DOMAIN_SEPARATOR',
+      })
+      return true
+    } catch {
+      return false
+    }
+  }, [address, publicClient])
+
+  useEffect(() => {
+    if (!token0 && !token1) return
+    let cancelled = false
+
+    const probe = async () => {
+      const updates: Record<string, boolean> = {}
+      const candidates = [token0, token1]
+      for (const token of candidates) {
+        if (!token || isNativeTokenAddress(token.address)) continue
+        const chainToken = toChainTokenAddress(token.address).toLowerCase()
+        if (permitSupportMap[chainToken] !== undefined) continue
+        updates[chainToken] = await detectPermitSupport(chainToken)
+      }
+
+      if (!cancelled && Object.keys(updates).length > 0) {
+        setPermitSupportMap((prev) => ({ ...prev, ...updates }))
+      }
+    }
+
+    probe()
+    return () => { cancelled = true }
+  }, [token0, token1, detectPermitSupport, permitSupportMap])
+
+  const token0SupportsPermit = Boolean(
+    token0 &&
+    !isNativeTokenAddress(token0.address) &&
+    permitSupportMap[toChainTokenAddress(token0.address).toLowerCase()]
+  )
+  const token1SupportsPermit = Boolean(
+    token1 &&
+    !isNativeTokenAddress(token1.address) &&
+    permitSupportMap[toChainTokenAddress(token1.address).toLowerCase()]
+  )
 
   // 获取代币余额
   const { data: token0Balance, refetch: refetchToken0Balance } = useBalance({
@@ -347,6 +464,155 @@ export default function LiquidityManager() {
     ])
   }, [refetchToken0Balance, refetchToken1Balance, refetchNativeBalance])
 
+  const buildPermitCalldata = useCallback(async ({
+    tokenAddress,
+    tokenName,
+    value,
+    deadline,
+  }: {
+    tokenAddress: `0x${string}`
+    tokenName: string
+    value: bigint
+    deadline: bigint
+  }): Promise<`0x${string}`> => {
+    if (!address || !publicClient) {
+      throw new Error('钱包未连接')
+    }
+
+    // 优先使用链上 name()/version() 作为 EIP-712 domain，避免前端缓存名称与合约不一致导致签名无效
+    let domainName = tokenName
+    let domainVersion = '1'
+    try {
+      const onchainName = await publicClient.readContract({
+        address: tokenAddress,
+        abi: ERC20_ABI,
+        functionName: 'name',
+      })
+      if (typeof onchainName === 'string' && onchainName.trim().length > 0) {
+        domainName = onchainName
+      }
+    } catch {
+      // keep fallback tokenName
+    }
+    try {
+      const onchainVersion = await publicClient.readContract({
+        address: tokenAddress,
+        abi: EIP712_VERSION_ABI,
+        functionName: 'version',
+      })
+      if (typeof onchainVersion === 'string' && onchainVersion.trim().length > 0) {
+        domainVersion = onchainVersion
+      }
+    } catch {
+      // most ERC20Permit tokens do not expose version(), keep "1"
+    }
+
+    const nonce = await publicClient.readContract({
+      address: tokenAddress,
+      abi: ERC20_PERMIT_ABI,
+      functionName: 'nonces',
+      args: [address],
+    })
+
+    const signature = await signTypedDataAsync({
+      account: address,
+      domain: {
+        name: domainName,
+        version: domainVersion,
+        chainId: publicClient.chain?.id ?? selectedChainId,
+        verifyingContract: tokenAddress,
+      },
+      types: {
+        Permit: [
+          { name: 'owner', type: 'address' },
+          { name: 'spender', type: 'address' },
+          { name: 'value', type: 'uint256' },
+          { name: 'nonce', type: 'uint256' },
+          { name: 'deadline', type: 'uint256' },
+        ],
+      },
+      primaryType: 'Permit',
+      message: {
+        owner: address,
+        spender: CONTRACTS.META_NODE_MANAGER as `0x${string}`,
+        value,
+        nonce,
+        deadline,
+      },
+    })
+
+    const parsed = parseSignature(signature)
+    const permitV = Number(parsed.v ?? (parsed.yParity === 0 ? 27 : 28))
+    const { r, s } = parsed
+
+    return encodeFunctionData({
+      abi: contractConfig.metaNodeManager.abi,
+      functionName: 'selfPermitIfNecessary',
+      args: [tokenAddress, value, deadline, permitV, r, s],
+    })
+  }, [address, publicClient, selectedChainId, signTypedDataAsync])
+
+  const assertBalanceAndAllowance = useCallback(async ({
+    tokenAddress,
+    amountRequired,
+    tokenSymbol,
+    tokenDecimals,
+  }: {
+    tokenAddress: `0x${string}`
+    amountRequired: bigint
+    tokenSymbol: string
+    tokenDecimals: number
+  }) => {
+    if (!address || !publicClient || amountRequired <= 0n) return
+
+    const bytecode = await publicClient.getBytecode({
+      address: tokenAddress,
+    })
+    if (!bytecode || bytecode === '0x') {
+      throw new Error(
+        `${tokenSymbol} 合约地址在当前网络不存在：${tokenAddress}。请确认钱包已切换到 Sepolia，且 WETH 地址配置正确。`
+      )
+    }
+
+    let balance: bigint
+    let allowance: bigint
+    try {
+      [balance, allowance] = await Promise.all([
+        publicClient.readContract({
+          address: tokenAddress,
+          abi: ERC20_ABI,
+          functionName: 'balanceOf',
+          args: [address],
+        }),
+        publicClient.readContract({
+          address: tokenAddress,
+          abi: ERC20_ABI,
+          functionName: 'allowance',
+          args: [address, CONTRACTS.META_NODE_MANAGER as `0x${string}`],
+        }),
+      ])
+    } catch (error) {
+      if (error instanceof BaseError) {
+        throw new Error(
+          `${tokenSymbol} 读取余额/授权失败，请确认当前网络与代币地址匹配（${tokenAddress}）。${error.shortMessage ?? ''}`.trim()
+        )
+      }
+      throw error
+    }
+
+    if (balance < amountRequired) {
+      throw new Error(
+        `${tokenSymbol} 余额不足（需要 ${formatUnits(amountRequired, tokenDecimals)}，当前 ${formatUnits(balance, tokenDecimals)}）`
+      )
+    }
+
+    if (allowance < amountRequired) {
+      throw new Error(
+        `${tokenSymbol} 授权不足（需要 ${formatUnits(amountRequired, tokenDecimals)}，当前 ${formatUnits(allowance, tokenDecimals)}）`
+      )
+    }
+  }, [address, publicClient])
+
   // 检查授权
   const checkAllowance = useCallback(async () => {
     if (!address || !token0 || !token1 || !amount0 || !amount1) {
@@ -366,7 +632,7 @@ export default function LiquidityManager() {
         body: JSON.stringify({
           token: toChainTokenAddress(token0.address),
           owner: address,
-          spender: CONTRACTS.POSITION_MANAGER,
+          spender: CONTRACTS.META_NODE_MANAGER,
         }),
       }).then(res => res.json())
 
@@ -378,23 +644,28 @@ export default function LiquidityManager() {
         body: JSON.stringify({
           token: toChainTokenAddress(token1.address),
           owner: address,
-          spender: CONTRACTS.POSITION_MANAGER,
+          spender: CONTRACTS.META_NODE_MANAGER,
         }),
       }).then(res => res.json())
 
       if (allowance0Response.success && allowance1Response.success) {
         const amountWei0 = parseUnits(amount0, token0.decimals)
         const amountWei1 = parseUnits(amount1, token1.decimals)
-        
-        setNeedsApproval0(BigInt(allowance0Response.allowance) < amountWei0)
-        setNeedsApproval1(BigInt(allowance1Response.allowance) < amountWei1)
+        const canSkipApprove0 = ENABLE_PERMIT_LIQUIDITY && token0SupportsPermit
+        const canSkipApprove1 = ENABLE_PERMIT_LIQUIDITY && token1SupportsPermit
+
+        setNeedsApproval0(!canSkipApprove0 && BigInt(allowance0Response.allowance) < amountWei0)
+        setNeedsApproval1(!canSkipApprove1 && BigInt(allowance1Response.allowance) < amountWei1)
       }
     } catch (error) {
       console.error('检查授权失败:', error)
+      // API 异常时采用保守策略：默认需要授权，避免直接发交易后在链上失败
+      setNeedsApproval0(Boolean(token0 && !isNativeTokenAddress(token0.address)))
+      setNeedsApproval1(Boolean(token1 && !isNativeTokenAddress(token1.address)))
     } finally {
       setIsCheckingAllowance(false)
     }
-  }, [address, token0, token1, amount0, amount1])
+  }, [address, token0, token1, amount0, amount1, token0SupportsPermit, token1SupportsPermit])
 
   useEffect(() => {
     checkAllowance()
@@ -414,7 +685,7 @@ export default function LiquidityManager() {
         address: actualTokenAddress as `0x${string}`,
         abi: ERC20_ABI,
         functionName: 'approve',
-        args: [CONTRACTS.POSITION_MANAGER as `0x${string}`, amountWei],
+        args: [CONTRACTS.META_NODE_MANAGER as `0x${string}`, amountWei],
       })
     } catch (error) {
       setTransactionAction(null)
@@ -451,18 +722,42 @@ export default function LiquidityManager() {
       const actualToken0Address = toChainTokenAddress(token0.address)
       const actualToken1Address = toChainTokenAddress(token1.address)
 
-      // 确保token0地址小于token1地址
+      // 确保 token0 地址小于 token1 地址，并同步对应 metadata（name/permit）
       let sortedToken0Address = actualToken0Address
       let sortedToken1Address = actualToken1Address
       let sortedAmount0 = amountWei0
       let sortedAmount1 = amountWei1
+      let sortedToken0Name = token0.name
+      let sortedToken1Name = token1.name
+      let sortedToken0SupportsPermit = token0SupportsPermit
+      let sortedToken1SupportsPermit = token1SupportsPermit
 
       if (BigInt(actualToken0Address) > BigInt(actualToken1Address)) {
         sortedToken0Address = actualToken1Address
         sortedToken1Address = actualToken0Address
         sortedAmount0 = amountWei1
         sortedAmount1 = amountWei0
+        sortedToken0Name = token1.name
+        sortedToken1Name = token0.name
+        sortedToken0SupportsPermit = token1SupportsPermit
+        sortedToken1SupportsPermit = token0SupportsPermit
       }
+
+      const sortedToken0Decimals = BigInt(actualToken0Address) > BigInt(actualToken1Address) ? token1.decimals : token0.decimals
+      const sortedToken1Decimals = BigInt(actualToken0Address) > BigInt(actualToken1Address) ? token0.decimals : token1.decimals
+
+      await assertBalanceAndAllowance({
+        tokenAddress: sortedToken0Address as `0x${string}`,
+        amountRequired: sortedAmount0,
+        tokenSymbol: sortedToken0Name,
+        tokenDecimals: sortedToken0Decimals,
+      })
+      await assertBalanceAndAllowance({
+        tokenAddress: sortedToken1Address as `0x${string}`,
+        amountRequired: sortedAmount1,
+        tokenSymbol: sortedToken1Name,
+        tokenDecimals: sortedToken1Decimals,
+      })
 
       // 计算初始价格
       const priceRatio = parseFloat(initialPrice)
@@ -485,28 +780,66 @@ export default function LiquidityManager() {
 
       setPriceError(null)
 
-      // 创建池子并初始化
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 1200)
+      const multicallData: `0x${string}`[] = []
+
+      if (ENABLE_PERMIT_LIQUIDITY && sortedToken0SupportsPermit && !isNativeTokenAddress(sortedToken0Address)) {
+        multicallData.push(
+          await buildPermitCalldata({
+            tokenAddress: sortedToken0Address as `0x${string}`,
+            tokenName: sortedToken0Name,
+            value: sortedAmount0,
+            deadline,
+          })
+        )
+      }
+
+      if (ENABLE_PERMIT_LIQUIDITY && sortedToken1SupportsPermit && !isNativeTokenAddress(sortedToken1Address)) {
+        multicallData.push(
+          await buildPermitCalldata({
+            tokenAddress: sortedToken1Address as `0x${string}`,
+            tokenName: sortedToken1Name,
+            value: sortedAmount1,
+            deadline,
+          })
+        )
+      }
+
+      const createAndAddLiquidityCalldata = encodeFunctionData({
+        abi: contractConfig.metaNodeManager.abi,
+        functionName: 'createAndAddLiquidity',
+        args: [
+          {
+            token0: sortedToken0Address as `0x${string}`,
+            token1: sortedToken1Address as `0x${string}`,
+            fee: selectedFee,
+            tickLower: -887272,
+            tickUpper: 887272,
+            sqrtPriceX96,
+          },
+          {
+            token0: sortedToken0Address as `0x${string}`,
+            token1: sortedToken1Address as `0x${string}`,
+            index: 0,
+            amount0Desired: sortedAmount0,
+            amount1Desired: sortedAmount1,
+            recipient: address,
+            deadline,
+          },
+        ],
+      })
+      multicallData.push(createAndAddLiquidityCalldata)
+
+      // 通过 MetaNodeManager.multicall 一笔完成「permit(可选) + 创建池子 + 添加流动性」
       setTransactionAction('createPool')
       setTransactionError(null)
-      await writeContractWithEstimatedGas({
-        address: CONTRACTS.POOL_MANAGER as `0x${string}`,
-        abi: contractConfig.poolManager.abi,
-        functionName: 'createAndInitializePoolIfNecessary',
-        args: [{
-          token0: sortedToken0Address as `0x${string}`,
-          token1: sortedToken1Address as `0x${string}`,
-          fee: selectedFee,
-          tickLower: -887272, // 全范围
-          tickUpper: 887272,
-          sqrtPriceX96,
-        }],
-      })
+      await writeMetaNodeManagerMulticall(multicallData)
     } catch (error) {
       console.error('创建池子失败:', error)
       setTransactionAction(null)
       setPriceError(getErrorMessage(error))
     }
-  }, [address, amount0, amount1, token0, token1, selectedFee, initialPrice, calculateSqrtPriceX96, writeContractWithEstimatedGas, getErrorMessage])
+  }, [address, amount0, amount1, token0, token1, selectedFee, initialPrice, calculateSqrtPriceX96, writeMetaNodeManagerMulticall, getErrorMessage, token0SupportsPermit, token1SupportsPermit, buildPermitCalldata, assertBalanceAndAllowance])
 
   // 添加流动性到已存在的池子
   const addLiquidity = useCallback(async () => {
@@ -525,26 +858,71 @@ export default function LiquidityManager() {
       const actualToken0Address = toChainTokenAddress(token0.address)
       const actualToken1Address = toChainTokenAddress(token1.address)
 
-      // 确保token0地址小于token1地址
+      // 确保 token0 地址小于 token1 地址，并同步对应 metadata（name/permit）
       let sortedToken0Address = actualToken0Address
       let sortedToken1Address = actualToken1Address
       let sortedAmount0 = amountWei0
       let sortedAmount1 = amountWei1
+      let sortedToken0Name = token0.name
+      let sortedToken1Name = token1.name
+      let sortedToken0SupportsPermit = token0SupportsPermit
+      let sortedToken1SupportsPermit = token1SupportsPermit
 
       if (BigInt(actualToken0Address) > BigInt(actualToken1Address)) {
         sortedToken0Address = actualToken1Address
         sortedToken1Address = actualToken0Address
         sortedAmount0 = amountWei1
         sortedAmount1 = amountWei0
+        sortedToken0Name = token1.name
+        sortedToken1Name = token0.name
+        sortedToken0SupportsPermit = token1SupportsPermit
+        sortedToken1SupportsPermit = token0SupportsPermit
       }
 
-      // 调用 PositionManager 的 mint 函数
-      setTransactionAction('addLiquidity')
-      setTransactionError(null)
-      await writeContractWithEstimatedGas({
-        address: CONTRACTS.POSITION_MANAGER as `0x${string}`,
-        abi: contractConfig.positionManager.abi,
-        functionName: 'mint',
+      const sortedToken0Decimals = BigInt(actualToken0Address) > BigInt(actualToken1Address) ? token1.decimals : token0.decimals
+      const sortedToken1Decimals = BigInt(actualToken0Address) > BigInt(actualToken1Address) ? token0.decimals : token1.decimals
+
+      await assertBalanceAndAllowance({
+        tokenAddress: sortedToken0Address as `0x${string}`,
+        amountRequired: sortedAmount0,
+        tokenSymbol: sortedToken0Name,
+        tokenDecimals: sortedToken0Decimals,
+      })
+      await assertBalanceAndAllowance({
+        tokenAddress: sortedToken1Address as `0x${string}`,
+        amountRequired: sortedAmount1,
+        tokenSymbol: sortedToken1Name,
+        tokenDecimals: sortedToken1Decimals,
+      })
+
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 1200)
+      const multicallData: `0x${string}`[] = []
+
+      if (ENABLE_PERMIT_LIQUIDITY && sortedToken0SupportsPermit && !isNativeTokenAddress(sortedToken0Address)) {
+        multicallData.push(
+          await buildPermitCalldata({
+            tokenAddress: sortedToken0Address as `0x${string}`,
+            tokenName: sortedToken0Name,
+            value: sortedAmount0,
+            deadline,
+          })
+        )
+      }
+
+      if (ENABLE_PERMIT_LIQUIDITY && sortedToken1SupportsPermit && !isNativeTokenAddress(sortedToken1Address)) {
+        multicallData.push(
+          await buildPermitCalldata({
+            tokenAddress: sortedToken1Address as `0x${string}`,
+            tokenName: sortedToken1Name,
+            value: sortedAmount1,
+            deadline,
+          })
+        )
+      }
+
+      const addLiquidityCalldata = encodeFunctionData({
+        abi: contractConfig.metaNodeManager.abi,
+        functionName: 'addLiquidity',
         args: [{
           token0: sortedToken0Address as `0x${string}`,
           token1: sortedToken1Address as `0x${string}`,
@@ -552,15 +930,21 @@ export default function LiquidityManager() {
           amount0Desired: sortedAmount0,
           amount1Desired: sortedAmount1,
           recipient: address,
-          deadline: BigInt(Math.floor(Date.now() / 1000) + 1200),
+          deadline,
         }],
       })
+      multicallData.push(addLiquidityCalldata)
+
+      // 通过 MetaNodeManager.multicall 执行「permit(可选) + 添加流动性」
+      setTransactionAction('addLiquidity')
+      setTransactionError(null)
+      await writeMetaNodeManagerMulticall(multicallData)
     } catch (error) {
       console.error('添加流动性失败:', error)
       setTransactionAction(null)
       setTransactionError(getErrorMessage(error))
     }
-  }, [address, amount0, amount1, token0, token1, currentPool, poolIndex, fetchPoolStatus, applyPoolStatus, writeContractWithEstimatedGas, getErrorMessage])
+  }, [address, amount0, amount1, token0, token1, currentPool, poolIndex, fetchPoolStatus, applyPoolStatus, writeMetaNodeManagerMulticall, getErrorMessage, token0SupportsPermit, token1SupportsPermit, buildPermitCalldata, assertBalanceAndAllowance])
 
   // 计算对应数量
   const calculateAmount = useCallback(async (inputToken: 'token0' | 'token1', amount: string) => {

@@ -103,6 +103,44 @@ export const SWAP_ROUTER_ABI = [
     ],
     outputs: [{ name: 'amountOut', type: 'uint256' }],
   },
+  {
+    type: 'function',
+    name: 'multicall',
+    stateMutability: 'payable',
+    inputs: [{ name: 'data', type: 'bytes[]' }],
+    outputs: [{ name: 'results', type: 'bytes[]' }],
+  },
+  {
+    type: 'function',
+    name: 'wrapETH',
+    stateMutability: 'payable',
+    inputs: [],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'unwrapWETH9',
+    stateMutability: 'payable',
+    inputs: [
+      { name: 'amountMinimum', type: 'uint256' },
+      { name: 'recipient', type: 'address' },
+    ],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'selfPermitIfNecessary',
+    stateMutability: 'payable',
+    inputs: [
+      { name: 'token', type: 'address' },
+      { name: 'value', type: 'uint256' },
+      { name: 'deadline', type: 'uint256' },
+      { name: 'v', type: 'uint8' },
+      { name: 'r', type: 'bytes32' },
+      { name: 's', type: 'bytes32' },
+    ],
+    outputs: [],
+  },
 ] as const
 
 // PoolManager ABI
@@ -227,6 +265,70 @@ export const POSITION_MANAGER_ABI = [
   },
   {
     type: 'function',
+    name: 'addLiquidity',
+    stateMutability: 'payable',
+    inputs: [
+      {
+        name: 'params',
+        type: 'tuple',
+        components: [
+          { name: 'token0', type: 'address' },
+          { name: 'token1', type: 'address' },
+          { name: 'index', type: 'uint32' },
+          { name: 'amount0Desired', type: 'uint256' },
+          { name: 'amount1Desired', type: 'uint256' },
+          { name: 'recipient', type: 'address' },
+          { name: 'deadline', type: 'uint256' },
+        ],
+      },
+    ],
+    outputs: [
+      { name: 'positionId', type: 'uint256' },
+      { name: 'liquidity', type: 'uint128' },
+      { name: 'amount0', type: 'uint256' },
+      { name: 'amount1', type: 'uint256' },
+    ],
+  },
+  {
+    type: 'function',
+    name: 'createAndAddLiquidity',
+    stateMutability: 'payable',
+    inputs: [
+      {
+        name: 'poolParams',
+        type: 'tuple',
+        components: [
+          { name: 'token0', type: 'address' },
+          { name: 'token1', type: 'address' },
+          { name: 'fee', type: 'uint24' },
+          { name: 'tickLower', type: 'int24' },
+          { name: 'tickUpper', type: 'int24' },
+          { name: 'sqrtPriceX96', type: 'uint160' },
+        ],
+      },
+      {
+        name: 'mintParams',
+        type: 'tuple',
+        components: [
+          { name: 'token0', type: 'address' },
+          { name: 'token1', type: 'address' },
+          { name: 'index', type: 'uint32' },
+          { name: 'amount0Desired', type: 'uint256' },
+          { name: 'amount1Desired', type: 'uint256' },
+          { name: 'recipient', type: 'address' },
+          { name: 'deadline', type: 'uint256' },
+        ],
+      },
+    ],
+    outputs: [
+      { name: 'positionId', type: 'uint256' },
+      { name: 'liquidity', type: 'uint128' },
+      { name: 'amount0', type: 'uint256' },
+      { name: 'amount1', type: 'uint256' },
+    ],
+  },
+  {
+    type: 'function',
     name: 'burn',
     stateMutability: 'nonpayable',
     inputs: [{ name: 'positionId', type: 'uint256' }],
@@ -247,6 +349,13 @@ export const POSITION_MANAGER_ABI = [
       { name: 'amount0', type: 'uint256' },
       { name: 'amount1', type: 'uint256' },
     ],
+  },
+  {
+    type: 'function',
+    name: 'multicall',
+    stateMutability: 'payable',
+    inputs: [{ name: 'data', type: 'bytes[]' }],
+    outputs: [{ name: 'results', type: 'bytes[]' }],
   },
 ] as const
 
@@ -342,6 +451,94 @@ export const LIQUIDITY_MANAGER_ABI = [
   },
 ] as const
 
+export const META_NODE_MANAGER_ABI = [
+  {
+    type: 'function',
+    name: 'multicall',
+    stateMutability: 'payable',
+    inputs: [{ name: 'data', type: 'bytes[]' }],
+    outputs: [{ name: 'results', type: 'bytes[]' }],
+  },
+  {
+    type: 'function',
+    name: 'selfPermitIfNecessary',
+    stateMutability: 'payable',
+    inputs: [
+      { name: 'token', type: 'address' },
+      { name: 'value', type: 'uint256' },
+      { name: 'deadline', type: 'uint256' },
+      { name: 'v', type: 'uint8' },
+      { name: 'r', type: 'bytes32' },
+      { name: 's', type: 'bytes32' },
+    ],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'addLiquidity',
+    stateMutability: 'payable',
+    inputs: [
+      {
+        name: 'mintParams',
+        type: 'tuple',
+        components: [
+          { name: 'token0', type: 'address' },
+          { name: 'token1', type: 'address' },
+          { name: 'index', type: 'uint32' },
+          { name: 'amount0Desired', type: 'uint256' },
+          { name: 'amount1Desired', type: 'uint256' },
+          { name: 'recipient', type: 'address' },
+          { name: 'deadline', type: 'uint256' },
+        ],
+      },
+    ],
+    outputs: [
+      { name: 'positionId', type: 'uint256' },
+      { name: 'liquidity', type: 'uint128' },
+      { name: 'amount0Used', type: 'uint256' },
+      { name: 'amount1Used', type: 'uint256' },
+    ],
+  },
+  {
+    type: 'function',
+    name: 'createAndAddLiquidity',
+    stateMutability: 'payable',
+    inputs: [
+      {
+        name: 'poolParams',
+        type: 'tuple',
+        components: [
+          { name: 'token0', type: 'address' },
+          { name: 'token1', type: 'address' },
+          { name: 'fee', type: 'uint24' },
+          { name: 'tickLower', type: 'int24' },
+          { name: 'tickUpper', type: 'int24' },
+          { name: 'sqrtPriceX96', type: 'uint160' },
+        ],
+      },
+      {
+        name: 'mintParams',
+        type: 'tuple',
+        components: [
+          { name: 'token0', type: 'address' },
+          { name: 'token1', type: 'address' },
+          { name: 'index', type: 'uint32' },
+          { name: 'amount0Desired', type: 'uint256' },
+          { name: 'amount1Desired', type: 'uint256' },
+          { name: 'recipient', type: 'address' },
+          { name: 'deadline', type: 'uint256' },
+        ],
+      },
+    ],
+    outputs: [
+      { name: 'positionId', type: 'uint256' },
+      { name: 'liquidity', type: 'uint128' },
+      { name: 'amount0Used', type: 'uint256' },
+      { name: 'amount1Used', type: 'uint256' },
+    ],
+  },
+] as const
+
 // 合约配置
 export const contractConfig = {
   swapRouter: {
@@ -365,5 +562,9 @@ export const contractConfig = {
   liquidityManager: {
     address: CONTRACTS.LIQUIDITY_MANAGER as `0x${string}`,
     abi: LIQUIDITY_MANAGER_ABI,
+  },
+  metaNodeManager: {
+    address: CONTRACTS.META_NODE_MANAGER as `0x${string}`,
+    abi: META_NODE_MANAGER_ABI,
   },
 } 

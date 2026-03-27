@@ -129,12 +129,16 @@ export async function initializeDatabase() {
     
     // 插入默认的代币信息
     const defaultTokens = [
-      ['0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14', 'WETH', 'Wrapped Ethereum', 18, null],
       ['0x4798388e3adE569570Df626040F07DF71135C48E', 'MNA', 'MetaNode Token A', 18, null],
       ['0x5A4eA3a013D42Cfd1B1609d19f6eA998EeE06D30', 'MNB', 'MetaNode Token B', 18, null],
       ['0x86B5df6FF459854ca91318274E47F4eEE245CF28', 'MNC', 'MetaNode Token C', 18, null],
       ['0x7af86B1034AC4C925Ef5C3F637D1092310d83F03', 'MND', 'MetaNode Token D', 18, null],
     ];
+
+    const wethAddress = process.env.NEXT_PUBLIC_WETH9_ADDRESS || process.env.NEXT_PUBLIC_WETH_ADDRESS;
+    if (wethAddress) {
+      defaultTokens.unshift([wethAddress, 'WETH', 'Wrapped Ethereum', 18, null]);
+    }
     
     for (const token of defaultTokens) {
       try {

@@ -1,16 +1,25 @@
 // 合约地址配置
 export const CONTRACTS = {
-  POOL_MANAGER: '0x4D328FF423E081115d62c3Ac7213C4cb36dbDd3C',
-  POSITION_MANAGER: '0x34E7f4040d3BF3add26857D23683DFb232883406',
-  SWAP_ROUTER: '0xe97cD3FCb30595fAC93679Fd3E54379A3B387337',
-  LIQUIDITY_MANAGER: '0x34E7f4040d3BF3add26857D23683DFb232883406', // 使用Position Manager作为流动性管理器
+  POOL_MANAGER: '0x1a1a6d0ef39908aa8b8dd0b7052dc05b07b64735',
+  POSITION_MANAGER: '0xa7e9e22cc2cfe5831e683b531ab636dca545acf5',
+  SWAP_ROUTER: '0xbdc9b8f2ab20989198ab8f47fdbb2992f219726d',
+  META_NODE_MANAGER: '0x8da623dcb3cd359d05682a2aac9bcb7a8eef3baf',
+  LIQUIDITY_MANAGER: '0xa7e9e22cc2cfe5831e683b531ab636dca545acf5', // 使用Position Manager作为流动性管理器
 } as const
+
+const WETH_ADDRESS =
+  process.env.NEXT_PUBLIC_WETH9_ADDRESS ||
+  process.env.NEXT_PUBLIC_WETH_ADDRESS
+
+if (!WETH_ADDRESS) {
+  throw new Error('缺少 NEXT_PUBLIC_WETH9_ADDRESS（或 NEXT_PUBLIC_WETH_ADDRESS）环境变量配置')
+}
 
 // 测试代币地址
 export const TOKENS = {
   ETH: {
     address: '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE', // 原生ETH的特殊地址
-    wrappedAddress: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14', // Sepolia WETH 地址
+    wrappedAddress: WETH_ADDRESS, // 通过环境变量注入 WETH 地址
     symbol: 'ETH',
     name: 'Ethereum',
     decimals: 18,

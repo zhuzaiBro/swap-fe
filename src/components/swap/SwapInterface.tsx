@@ -1,10 +1,11 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { ArrowUpDown, Settings, ChevronDown, CheckCircle, Clock } from 'lucide-react'
 import { useAccount, useBalance } from 'wagmi'
 import { parseUnits } from 'viem'
-import { TOKENS } from '@/lib/constants'
+import { TOKENS, toChainTokenAddress } from '@/lib/constants'
+import { supabase } from '@/lib/supabase'
 import { cn, formatTokenAmount, parseInputAmount, shortenAddress } from '@/lib/utils'
 import { useSwap } from '@/hooks/useSwap'
 import { usePools } from '@/hooks/usePools'
@@ -14,12 +15,42 @@ type Token = {
   symbol: string
   name: string
   decimals: number
+  supportsPermit?: boolean
 }
+
+const ETH_TOKEN: Token = {
+  address: TOKENS.ETH.address,
+  symbol: TOKENS.ETH.symbol,
+  name: TOKENS.ETH.name,
+  decimals: TOKENS.ETH.decimals,
+  supportsPermit: false,
+}
+const ETH_ADDRESS_LOWER = TOKENS.ETH.address.toLowerCase()
+const WETH_ADDRESS_LOWER = TOKENS.ETH.wrappedAddress.toLowerCase()
+const LEGACY_WETH_ADDRESS_LOWER = '0xfff9976782d46cc05630d1f6ebab18b2324d6b14'
+const WRAPPED_ETH_ALIASES = new Set<string>([
+  WETH_ADDRESS_LOWER,
+  LEGACY_WETH_ADDRESS_LOWER,
+])
+
+const FALLBACK_TOKEN_LIST: Token[] = [
+  ETH_TOKEN,
+  ...Object.values(TOKENS)
+  .filter((token) => !('isNative' in token && token.isNative))
+  .map((token) => ({
+    address: token.address,
+    symbol: token.symbol,
+    name: token.name,
+    decimals: token.decimals,
+    supportsPermit: false,
+  })),
+]
 
 export default function SwapInterface() {
   const { address, isConnected } = useAccount()
-  const [fromToken, setFromToken] = useState<Token>(TOKENS.MNTokenA)
-  const [toToken, setToToken] = useState<Token>(TOKENS.MNTokenB)
+  const [tokenList, setTokenList] = useState<Token[]>(FALLBACK_TOKEN_LIST)
+  const [fromToken, setFromToken] = useState<Token>(FALLBACK_TOKEN_LIST[0])
+  const [toToken, setToToken] = useState<Token>(FALLBACK_TOKEN_LIST[1] ?? FALLBACK_TOKEN_LIST[0])
   const [fromAmount, setFromAmount] = useState('')
   const [toAmount, setToAmount] = useState('')
   const [slippage, setSlippage] = useState(0.5)
@@ -41,46 +72,257 @@ export default function SwapInterface() {
     hash,
   } = useSwap()
   const { pools, loading: poolsLoading, error: poolsError } = usePools();
+  const toComparableAddress = useCallback((tokenAddress: string) => {
+    const normalized = tokenAddress.toLowerCase()
+    if (normalized === ETH_ADDRESS_LOWER || WRAPPED_ETH_ALIASES.has(normalized)) {
+      return WETH_ADDRESS_LOWER
+    }
+    return toChainTokenAddress(tokenAddress).toLowerCase()
+  }, [])
+  const isEthLikeAddress = useCallback((tokenAddress: string) => {
+    const normalized = tokenAddress.toLowerCase()
+    return normalized === ETH_ADDRESS_LOWER || WRAPPED_ETH_ALIASES.has(normalized)
+  }, [])
+
+  const expandAddressAlias = useCallback((tokenAddress: string) => {
+    const normalized = tokenAddress.toLowerCase()
+    if (normalized === ETH_ADDRESS_LOWER || WRAPPED_ETH_ALIASES.has(normalized)) {
+      return [ETH_ADDRESS_LOWER, ...Array.from(WRAPPED_ETH_ALIASES)]
+    }
+    return [normalized]
+  }, [])
 
   useEffect(() => {
     // console.log('pools', pools)
   }, [pools])
 
+  useEffect(() => {
+    if (isEthLikeAddress(fromToken.address) && fromToken.address.toLowerCase() !== ETH_ADDRESS_LOWER) {
+      setFromToken(ETH_TOKEN)
+    }
+    if (isEthLikeAddress(toToken.address) && toToken.address.toLowerCase() !== ETH_ADDRESS_LOWER) {
+      setToToken(ETH_TOKEN)
+    }
+  }, [fromToken.address, toToken.address, isEthLikeAddress])
+
+  const poolAdjacency = useMemo(() => {
+    const adjacency = new Map<string, Set<string>>()
+
+    const addEdge = (a: string, b: string) => {
+      const keyA = a.toLowerCase()
+      const keyB = b.toLowerCase()
+      if (!adjacency.has(keyA)) adjacency.set(keyA, new Set())
+      adjacency.get(keyA)!.add(keyB)
+    }
+
+    for (const pool of pools) {
+      addEdge(pool.token0, pool.token1)
+      addEdge(pool.token1, pool.token0)
+    }
+    return adjacency
+  }, [pools])
+
+  const getLinkedTokenOptions = useCallback(
+    (baseTokenAddress: string, fallbackExcludeAddress?: string) => {
+      const baseAliases = expandAddressAlias(baseTokenAddress)
+      const linked = new Set<string>()
+      for (const alias of baseAliases) {
+        for (const next of poolAdjacency.get(alias) ?? []) {
+          linked.add(next)
+          for (const nextAlias of expandAddressAlias(next)) {
+            linked.add(nextAlias)
+          }
+        }
+      }
+
+      const excludeComparable = fallbackExcludeAddress
+        ? toComparableAddress(fallbackExcludeAddress)
+        : undefined
+
+      if (!linked || linked.size === 0) {
+        return tokenList.filter(
+          (token) => toComparableAddress(token.address) !== excludeComparable
+        )
+      }
+
+      return tokenList.filter((token) => {
+        if (toComparableAddress(token.address) === excludeComparable) return false
+        return expandAddressAlias(token.address).some((alias) => linked.has(alias))
+      })
+    },
+    [poolAdjacency, tokenList, expandAddressAlias, toComparableAddress]
+  )
+
+  const toTokenOptions = useMemo(() => {
+    return getLinkedTokenOptions(fromToken.address, fromToken.address)
+  }, [fromToken.address, getLinkedTokenOptions])
+
+  const fromTokenOptions = useMemo(() => {
+    return getLinkedTokenOptions(toToken.address, toToken.address)
+  }, [toToken.address, getLinkedTokenOptions])
+
+  const activePairPools = useMemo(() => {
+    const from = toComparableAddress(fromToken.address)
+    const to = toComparableAddress(toToken.address)
+    return pools.filter((pool) => {
+      const p0 = toComparableAddress(pool.token0)
+      const p1 = toComparableAddress(pool.token1)
+      return (p0 === from && p1 === to) || (p0 === to && p1 === from)
+    })
+  }, [pools, fromToken.address, toToken.address, toComparableAddress])
+
+  const selectedIndexPath = useMemo<number[]>(() => {
+    if (activePairPools.length === 0) return []
+    const sorted = [...activePairPools].sort((a, b) => {
+      const liqA = Number(a.liquidity || '0')
+      const liqB = Number(b.liquidity || '0')
+      return liqB - liqA
+    })
+    return [sorted[0].index]
+  }, [activePairPools])
+
+  // 优先使用 Supabase tokens 表；失败时回退到前端内置列表。
+  useEffect(() => {
+    const loadTokens = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('tokens')
+          .select('address, symbol, name, decimals, supports_permit')
+          .order('symbol', { ascending: true })
+
+        if (error) {
+          throw error
+        }
+
+        const fetchedTokens = (data ?? [])
+          .filter(
+            (token) =>
+              !!token.address &&
+              !!token.symbol &&
+              !!token.name &&
+              typeof token.decimals === 'number' &&
+              !WRAPPED_ETH_ALIASES.has(token.address.toLowerCase()) &&
+              token.symbol.toUpperCase() !== 'WETH'
+          )
+          .map((token) => ({
+            address: token.address,
+            symbol: token.symbol,
+            name: token.name,
+            decimals: token.decimals,
+            supportsPermit: Boolean(token.supports_permit),
+          }))
+
+        const mergedTokenMap = new Map<string, Token>()
+        for (const token of fetchedTokens) {
+          mergedTokenMap.set(token.address.toLowerCase(), token)
+        }
+        mergedTokenMap.set(ETH_TOKEN.address.toLowerCase(), ETH_TOKEN)
+
+        const mergedTokens = Array.from(mergedTokenMap.values()).sort((a, b) => {
+          if (a.address.toLowerCase() === ETH_TOKEN.address.toLowerCase()) return -1
+          if (b.address.toLowerCase() === ETH_TOKEN.address.toLowerCase()) return 1
+          return a.symbol.localeCompare(b.symbol)
+        })
+
+        if (mergedTokens.length === 0) return
+
+        setTokenList(mergedTokens)
+        setFromToken((prev) => {
+          return (
+            mergedTokens.find(
+              (token) => token.address.toLowerCase() === prev.address.toLowerCase()
+            ) ?? mergedTokens[0]
+          )
+        })
+        setToToken((prev) => {
+          return (
+            mergedTokens.find(
+              (token) => token.address.toLowerCase() === prev.address.toLowerCase()
+            ) ?? mergedTokens[1] ?? mergedTokens[0]
+          )
+        })
+      } catch (error) {
+        console.error('加载 Supabase 代币列表失败，回退到前端默认列表:', error)
+      }
+    }
+
+    loadTokens()
+  }, [])
+
   // 获取代币余额
   const { data: fromTokenBalance } = useBalance({
     address: address,
-    token: fromToken.address as `0x${string}`,
+    token: isEthLikeAddress(fromToken.address)
+      ? undefined
+      : toChainTokenAddress(fromToken.address) as `0x${string}`,
     query: {
-      enabled: Boolean(address && isConnected),
+      enabled: Boolean(address && isConnected && !isEthLikeAddress(fromToken.address)),
     },
   })
 
   const { data: toTokenBalance } = useBalance({
     address: address,
-    token: toToken.address as `0x${string}`,
+    token: isEthLikeAddress(toToken.address)
+      ? undefined
+      : toChainTokenAddress(toToken.address) as `0x${string}`,
+    query: {
+      enabled: Boolean(address && isConnected && !isEthLikeAddress(toToken.address)),
+    },
+  })
+
+  const { data: nativeBalance } = useBalance({
+    address,
     query: {
       enabled: Boolean(address && isConnected),
     },
   })
 
-  // 检查授权
-  const { data: allowance, refetch: refetchAllowance } = useTokenAllowance(fromToken.address)
+  const displayedFromBalance = isEthLikeAddress(fromToken.address)
+    ? nativeBalance
+    : fromTokenBalance
+  const displayedToBalance = isEthLikeAddress(toToken.address)
+    ? nativeBalance
+    : toTokenBalance
 
-  const tokenList = Object.values(TOKENS)
+  // 检查授权（原生 ETH 不需要 allowance）
+  const { data: allowance, refetch: refetchAllowance } = useTokenAllowance(
+    isEthLikeAddress(fromToken.address) ? '' : fromToken.address
+  )
 
   // 检查是否需要授权
   useEffect(() => {
-    if (allowance && fromAmount) {
+    if (isEthLikeAddress(fromToken.address)) {
+      setNeedsApproval(false)
+      return
+    }
+
+    if (fromToken.supportsPermit) {
+      setNeedsApproval(false)
+      return
+    }
+
+    if (!fromAmount || parseFloat(fromAmount) <= 0) {
+      setNeedsApproval(false)
+      return
+    }
+
+    // 非 permit 代币在 allowance 未就绪时，保守地要求先授权，避免直接发起失败交易。
+    if (allowance == null) {
+      setNeedsApproval(true)
+      return
+    }
+
+    if (fromAmount) {
       try {
         const amountWei = parseUnits(fromAmount, fromToken.decimals)
         setNeedsApproval(allowance < amountWei)
       } catch {
-        setNeedsApproval(false)
+        setNeedsApproval(true)
       }
     } else {
       setNeedsApproval(false)
     }
-  }, [allowance, fromAmount, fromToken.decimals])
+  }, [allowance, fromAmount, fromToken.address, fromToken.decimals, fromToken.supportsPermit, isEthLikeAddress])
 
   // 自动获取价格预估
   const updateQuote = useCallback(async () => {
@@ -98,6 +340,9 @@ export default function SwapInterface() {
         tokenOut: toToken.address,
         amountIn: fromAmount,
         slippage,
+        indexPath: selectedIndexPath,
+        tokenInDecimals: fromToken.decimals,
+        tokenOutDecimals: toToken.decimals,
       })
 
       if (quote) {
@@ -117,7 +362,7 @@ export default function SwapInterface() {
     } finally {
       setIsQuoting(false)
     }
-  }, [fromAmount, fromToken.address, toToken.address, slippage, getQuote])
+  }, [fromAmount, fromToken.address, toToken.address, fromToken.decimals, toToken.decimals, getQuote, slippage, selectedIndexPath])
 
   // 当输入参数变化时获取报价 - 修复无限循环
   useEffect(() => {
@@ -152,7 +397,7 @@ export default function SwapInterface() {
     if (!fromAmount) return
     
     try {
-      await approveToken(fromToken.address, fromAmount)
+      await approveToken(fromToken.address, fromAmount, fromToken.decimals)
     } catch (error) {
       console.error('Approval failed:', error)
     }
@@ -160,6 +405,14 @@ export default function SwapInterface() {
 
   const handleSwap = async () => {
     if (!fromAmount || !toAmount || !isConnected) return
+    if (needsApproval) {
+      setQuoteError('授权不足，请先点击 Approve')
+      return
+    }
+    if (selectedIndexPath.length === 0) {
+      setQuoteError('未找到可用池子')
+      return
+    }
     
     try {
       await executeSwap({
@@ -167,6 +420,11 @@ export default function SwapInterface() {
         tokenOut: toToken.address,
         amountIn: fromAmount,
         slippage,
+        indexPath: selectedIndexPath,
+        tokenInDecimals: fromToken.decimals,
+        tokenOutDecimals: toToken.decimals,
+        tokenInName: fromToken.name,
+        tokenInSupportsPermit: fromToken.supportsPermit,
       })
     } catch (error) {
       console.error('Swap failed:', error)
@@ -174,8 +432,8 @@ export default function SwapInterface() {
   }
 
   const handleMaxAmount = () => {
-    if (fromTokenBalance) {
-      setFromAmount(fromTokenBalance.formatted)
+    if (displayedFromBalance) {
+      setFromAmount(displayedFromBalance.formatted)
     }
   }
 
@@ -186,14 +444,47 @@ export default function SwapInterface() {
     }
   }, [isConfirmed, refetchAllowance])
 
+  // 当 pool 关系或代币列表变化时，自动修正不合法的交易对组合。
+  useEffect(() => {
+    if (fromToken.address.toLowerCase() === toToken.address.toLowerCase()) {
+      const firstValidTo = toTokenOptions.find(
+        (token) => token.address.toLowerCase() !== fromToken.address.toLowerCase()
+      )
+      if (firstValidTo) {
+        setToToken(firstValidTo)
+      }
+      return
+    }
+
+    const isCurrentToValid = toTokenOptions.some(
+      (token) => token.address.toLowerCase() === toToken.address.toLowerCase()
+    )
+    if (!isCurrentToValid) {
+      const nextTo = toTokenOptions[0]
+      if (nextTo) setToToken(nextTo)
+    }
+  }, [fromToken.address, toToken.address, toTokenOptions])
+
+  useEffect(() => {
+    const isCurrentFromValid = fromTokenOptions.some(
+      (token) => token.address.toLowerCase() === fromToken.address.toLowerCase()
+    )
+    if (!isCurrentFromValid) {
+      const nextFrom = fromTokenOptions[0]
+      if (nextFrom) setFromToken(nextFrom)
+    }
+  }, [fromToken.address, fromTokenOptions])
+
   const TokenSelector = ({ 
     selectedToken, 
     onSelect, 
-    label 
+    label,
+    options,
   }: { 
     selectedToken: Token
     onSelect: (token: Token) => void
     label: string 
+    options: Token[]
   }) => {
     const [isOpen, setIsOpen] = useState(false)
 
@@ -214,7 +505,12 @@ export default function SwapInterface() {
           <div className="absolute top-full mt-1 w-48 bg-background border border-border rounded-lg shadow-lg z-50">
             <div className="p-2">
               <div className="text-sm text-muted-foreground px-2 py-1">{label}</div>
-              {tokenList.map((token) => (
+              {options.length === 0 && (
+                <div className="px-2 py-2 text-xs text-muted-foreground">
+                  暂无可交易池
+                </div>
+              )}
+              {options.map((token) => (
                 <button
                   key={token.address}
                   onClick={() => {
@@ -330,9 +626,9 @@ export default function SwapInterface() {
             <span className="text-sm text-muted-foreground">从</span>
             <div className="flex items-center space-x-2">
               <span className="text-sm text-muted-foreground">
-                余额: {fromTokenBalance ? formatTokenAmount(fromTokenBalance.formatted) : '0'}
+                余额: {displayedFromBalance ? formatTokenAmount(displayedFromBalance.formatted) : '0'}
               </span>
-              {fromTokenBalance && parseFloat(fromTokenBalance.formatted) > 0 && (
+              {displayedFromBalance && parseFloat(displayedFromBalance.formatted) > 0 && (
                 <button
                   onClick={handleMaxAmount}
                   className="text-xs text-primary hover:text-primary/80 font-medium"
@@ -354,6 +650,7 @@ export default function SwapInterface() {
               selectedToken={fromToken}
               onSelect={setFromToken}
               label="选择代币"
+              options={fromTokenOptions}
             />
           </div>
         </div>
@@ -373,7 +670,7 @@ export default function SwapInterface() {
           <div className="flex items-center justify-between mb-2">
             <span className="text-sm text-muted-foreground">到</span>
             <span className="text-sm text-muted-foreground">
-              余额: {toTokenBalance ? formatTokenAmount(toTokenBalance.formatted) : '0'}
+              余额: {displayedToBalance ? formatTokenAmount(displayedToBalance.formatted) : '0'}
             </span>
           </div>
           <div className="flex items-center justify-between p-4 bg-muted rounded-lg">
@@ -395,6 +692,7 @@ export default function SwapInterface() {
               selectedToken={toToken}
               onSelect={setToToken}
               label="选择代币"
+              options={toTokenOptions}
             />
           </div>
           {quoteError && (
@@ -426,7 +724,14 @@ export default function SwapInterface() {
           ) : (
             <button
               onClick={handleSwap}
-              disabled={isPending || isConfirming || !fromAmount || !toAmount || parseFloat(fromAmount) === 0}
+              disabled={
+                isPending ||
+                isConfirming ||
+                !fromAmount ||
+                !toAmount ||
+                parseFloat(fromAmount) === 0 ||
+                selectedIndexPath.length === 0
+              }
               className="w-full bg-primary hover:bg-primary/90 disabled:bg-muted disabled:cursor-not-allowed text-primary-foreground font-medium py-3 px-4 rounded-lg transition-colors"
             >
               {isPending || isConfirming ? '交换中...' : '交换'}

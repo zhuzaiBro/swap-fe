@@ -38,6 +38,7 @@ export async function GET(request: NextRequest) {
       liquidity: pool.liquidity,
       sqrtPriceX96: pool.sqrt_price_x96,
       tick: pool.tick,
+      poolIndex: pool.pool_index ?? 0,
       // Calculate TVL, Volume, Fees - For now using placeholders or basic calculations
       // Ideally these should come from aggregated tables or real-time calculations
       tvl: '0', // TODO: Calculate from liquidity and price
@@ -45,7 +46,7 @@ export async function GET(request: NextRequest) {
       volume24h: '0', // TODO: Aggregate from swaps
       feesUSD: 0, // TODO: Aggregate from fees
       pair: `${pool.token0_data?.symbol || 'UNK'} / ${pool.token1_data?.symbol || 'UNK'}`,
-      index: 0, // Use index if available in DB
+      index: pool.pool_index ?? 0,
       token0Balance: '0', // Needs on-chain call or indexer balance tracking
       token1Balance: '0',
     }));
