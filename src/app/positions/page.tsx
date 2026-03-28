@@ -5,6 +5,7 @@ import { useAccount } from 'wagmi'
 import { formatNumber } from '@/lib/utils'
 import { NetworkChecker } from '@/components/NetworkChecker'
 import { Loader2, Droplets, Plus, TrendingUp, TrendingDown } from 'lucide-react'
+import Link from 'next/link'
 
 export default function PositionsPage() {
   const { isConnected } = useAccount()
@@ -91,10 +92,13 @@ export default function PositionsPage() {
           <div className="p-6 border-b">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-semibold">我的头寸</h2>
-              <button className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors flex items-center gap-2">
+              <Link
+                href="/liquidity"
+                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors flex items-center gap-2"
+              >
                 <Plus className="h-4 w-4" />
                 新建头寸
-              </button>
+              </Link>
             </div>
           </div>
 
@@ -127,10 +131,13 @@ export default function PositionsPage() {
               <p className="text-gray-600 mb-4">
                 开始提供流动性来赚取交易费用
               </p>
-              <button className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg transition-colors inline-flex items-center gap-2">
+              <Link
+                href="/liquidity"
+                className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg transition-colors inline-flex items-center gap-2"
+              >
                 <Plus className="h-4 w-4" />
                 新建头寸
-              </button>
+              </Link>
             </div>
           ) : (
             <div className="p-6">
@@ -165,9 +172,12 @@ export default function PositionsPage() {
                           )}
                           {position.status === 'in-range' ? '范围内' : '范围外'}
                         </span>
-                        <button className="text-blue-600 hover:text-blue-800 text-sm font-medium">
+                        <Link
+                          href={`/positions/${position.id}`}
+                          className="text-blue-600 hover:text-blue-800 text-sm font-medium"
+                        >
                           管理
-                        </button>
+                        </Link>
                       </div>
                     </div>
 
@@ -197,15 +207,24 @@ export default function PositionsPage() {
                         </div>
                       </div>
                       <div className="flex flex-col space-y-2">
-                        <button className="text-blue-600 hover:text-blue-800 text-xs px-2 py-1 border border-blue-200 rounded">
+                        <Link
+                          href={`/positions/${position.id}`}
+                          className="text-blue-600 hover:text-blue-800 text-xs px-2 py-1 border border-blue-200 rounded text-center"
+                        >
                           增加流动性
-                        </button>
-                        <button className="text-red-600 hover:text-red-800 text-xs px-2 py-1 border border-red-200 rounded">
+                        </Link>
+                        <Link
+                          href={`/positions/${position.id}`}
+                          className="text-red-600 hover:text-red-800 text-xs px-2 py-1 border border-red-200 rounded text-center"
+                        >
                           移除流动性
-                        </button>
-                        <button className="text-green-600 hover:text-green-800 text-xs px-2 py-1 border border-green-200 rounded">
+                        </Link>
+                        <Link
+                          href={`/positions/${position.id}`}
+                          className="text-green-600 hover:text-green-800 text-xs px-2 py-1 border border-green-200 rounded text-center"
+                        >
                           领取费用
-                        </button>
+                        </Link>
                       </div>
                     </div>
                   </div>
