@@ -7,7 +7,7 @@ import { contractConfig } from '@/lib/contracts'
 // 创建公共客户端连接
 const client = createPublicClient({
   chain: sepolia,
-  transport: http(process.env.SEPOLIA_RPC_URL || 'https://eth-sepolia.g.alchemy.com/v2/EykKv3BK7V4UWchOj2M9l'),
+  transport: http(process.env.SEPOLIA_RPC_URL || 'https://rpc.ankr.com/eth_sepolia'),
 })
 
 export async function POST(request: Request) {

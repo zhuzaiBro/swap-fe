@@ -79,7 +79,7 @@ export function getTokenByAddress(address?: string | null) {
 export const NETWORK_CONFIG = {
   chainId: 11155111, // Sepolia
   name: 'Sepolia',
-  rpcUrl: process.env.SEPOLIA_RPC_URL || 'https://eth-sepolia.g.alchemy.com/v2/EykKv3BK7V4UWchOj2M9l',
+  rpcUrl: process.env.SEPOLIA_RPC_URL || 'https://rpc.ankr.com/eth_sepolia',
   blockExplorer: 'https://sepolia.etherscan.io',
 } as const
 
