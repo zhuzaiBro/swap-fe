@@ -7,7 +7,7 @@ import { toChainTokenAddress } from '@/lib/constants'
 // 创建公共客户端连接
 const client = createPublicClient({
   chain: sepolia,
-  transport: http(process.env.SEPOLIA_RPC_URL || 'https://rpc.ankr.com/eth_sepolia'),
+  transport: http(process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com'),
 })
 
 export async function POST(request: Request) {
