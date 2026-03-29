@@ -7,7 +7,7 @@ import { toChainTokenAddress } from '@/lib/constants'
 // 创建公共客户端连接
 const client = createPublicClient({
   chain: sepolia,
-  transport: http(process.env.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com'),
+  transport: http(process.env.SEPOLIA_RPC_URL || 'https://sepolia.infura.io/v3/3fb192ba9f724e6497fff0a0abd04f98'),
 })
 
 export async function POST(request: Request) {

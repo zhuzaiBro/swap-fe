@@ -8,7 +8,7 @@ export const config = getDefaultConfig({
   projectId: process.env.NEXT_PUBLIC_WALLET_CONNECT_PROJECT_ID || 'YOUR_PROJECT_ID', // 可选，用于 WalletConnect
   chains: [sepolia],
   transports: {
-    [sepolia.id]: http(process.env.SEPOLIA_RPC_URL || 'https://rpc.ankr.com/eth_sepolia'),
+    [sepolia.id]: http(process.env.SEPOLIA_RPC_URL || 'https://sepolia.infura.io/v3/3fb192ba9f724e6497fff0a0abd04f98'),
   },
   ssr: true, // 如果你的 dApp 使用服务器端渲染 (SSR)
 })
