@@ -150,12 +150,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Missing parameters' }, { status: 400 })
     }
 
-    if (await isScannerStale()) {
-      return NextResponse.json(
-        { error: 'Indexer lagging', msg: '后端扫链未同步完成，请稍后重试' },
-        { status: 503 }
-      )
-    }
+    // if (await isScannerStale()) {
+    //   return NextResponse.json(
+    //     { error: 'Indexer lagging', msg: '后端扫链未同步完成，请稍后重试' },
+    //     { status: 503 }
+    //   )
+    // }
 
     const pools = await findPoolsForPair(tokenIn, tokenOut)
     if (!pools || pools.length === 0) {

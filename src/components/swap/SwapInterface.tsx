@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { ArrowUpDown, Settings, ChevronDown, CheckCircle, Clock } from 'lucide-react'
 import { useAccount, useBalance } from 'wagmi'
 import { parseUnits } from 'viem'
@@ -33,6 +33,8 @@ const WRAPPED_ETH_ALIASES = new Set<string>([
   LEGACY_WETH_ADDRESS_LOWER,
 ])
 
+const EMPTY_INDEX_PATH: number[] = []
+
 const FALLBACK_TOKEN_LIST: Token[] = [
   ETH_TOKEN,
   ...Object.values(TOKENS)
@@ -55,7 +57,6 @@ export default function SwapInterface() {
   const [toAmount, setToAmount] = useState('')
   const [slippage, setSlippage] = useState(0.5)
   const [showSettings, setShowSettings] = useState(false)
-  const [needsApproval, setNeedsApproval] = useState(false)
   const [isQuoting, setIsQuoting] = useState(false)
   const [isSimulated, setIsSimulated] = useState(false)
   const [quoteError, setQuoteError] = useState<string | null>(null)
@@ -171,15 +172,21 @@ export default function SwapInterface() {
     })
   }, [pools, fromToken.address, toToken.address, toComparableAddress])
 
-  const selectedIndexPath = useMemo<number[]>(() => {
-    if (activePairPools.length === 0) return []
+  // 流动性最高的池 index；先收敛为标量再生成 path，避免 activePairPools 仅引用变化时 new [] 触发下游无限更新。
+  const primaryPoolIndex = useMemo(() => {
+    if (activePairPools.length === 0) return -1
     const sorted = [...activePairPools].sort((a, b) => {
       const liqA = Number(a.liquidity || '0')
       const liqB = Number(b.liquidity || '0')
       return liqB - liqA
     })
-    return [sorted[0].index]
+    return Number(sorted[0].index)
   }, [activePairPools])
+
+  const selectedIndexPath = useMemo<number[]>(() => {
+    if (primaryPoolIndex < 0) return EMPTY_INDEX_PATH
+    return [primaryPoolIndex]
+  }, [primaryPoolIndex])
 
   // 优先使用 Supabase tokens 表；失败时回退到前端内置列表。
   useEffect(() => {
@@ -289,40 +296,26 @@ export default function SwapInterface() {
     isEthLikeAddress(fromToken.address) ? '' : fromToken.address
   )
 
-  // 检查是否需要授权
-  useEffect(() => {
-    if (isEthLikeAddress(fromToken.address)) {
-      setNeedsApproval(false)
-      return
+  // 派生状态：避免 useEffect + setState；allowance 等依赖在 wagmi 下可能每帧变引用，会触发「Maximum update depth」。
+  const needsApproval = useMemo(() => {
+    if (isEthLikeAddress(fromToken.address)) return false
+    if (fromToken.supportsPermit) return false
+    if (!fromAmount || parseFloat(fromAmount) <= 0) return false
+    if (allowance == null) return true
+    try {
+      const amountWei = parseUnits(fromAmount, fromToken.decimals)
+      return allowance < amountWei
+    } catch {
+      return true
     }
-
-    if (fromToken.supportsPermit) {
-      setNeedsApproval(false)
-      return
-    }
-
-    if (!fromAmount || parseFloat(fromAmount) <= 0) {
-      setNeedsApproval(false)
-      return
-    }
-
-    // 非 permit 代币在 allowance 未就绪时，保守地要求先授权，避免直接发起失败交易。
-    if (allowance == null) {
-      setNeedsApproval(true)
-      return
-    }
-
-    if (fromAmount) {
-      try {
-        const amountWei = parseUnits(fromAmount, fromToken.decimals)
-        setNeedsApproval(allowance < amountWei)
-      } catch {
-        setNeedsApproval(true)
-      }
-    } else {
-      setNeedsApproval(false)
-    }
-  }, [allowance, fromAmount, fromToken.address, fromToken.decimals, fromToken.supportsPermit, isEthLikeAddress])
+  }, [
+    allowance,
+    fromAmount,
+    fromToken.address,
+    fromToken.decimals,
+    fromToken.supportsPermit,
+    isEthLikeAddress,
+  ])
 
   // 自动获取价格预估
   const updateQuote = useCallback(async () => {
@@ -364,25 +357,46 @@ export default function SwapInterface() {
     }
   }, [fromAmount, fromToken.address, toToken.address, fromToken.decimals, toToken.decimals, getQuote, slippage, selectedIndexPath])
 
-  // 当输入参数变化时获取报价 - 修复无限循环
+  const updateQuoteRef = useRef(updateQuote)
+  updateQuoteRef.current = updateQuote
+
+  /** 有有效卖出数量时才拉报价/展示误差与「到」侧数字；避免空输入时 effect 随池子 index 等依赖反复 setState。 */
+  const shouldShowQuote = useMemo(() => {
+    if (!fromAmount) return false
+    const n = parseFloat(fromAmount)
+    return Number.isFinite(n) && n > 0
+  }, [fromAmount])
+
+  const displayToAmount = shouldShowQuote ? toAmount : ''
+  const displayQuoteError = shouldShowQuote ? quoteError : null
+
+  // 防抖拉报价：空输入分支不要 setState（否则依赖变动仍会无限更新）；清空时在 handleFromAmountChange 里同步即可。
   useEffect(() => {
-    if (!fromAmount || parseFloat(fromAmount) === 0) {
-      setToAmount('')
-      setQuoteError(null)
-      return
-    }
-    
+    if (!shouldShowQuote) return
+
     const timer = setTimeout(() => {
-      updateQuote()
-    }, 500) // 防抖 500ms
+      void updateQuoteRef.current()
+    }, 500)
     return () => clearTimeout(timer)
-  }, [fromAmount, fromToken.address, toToken.address, slippage, updateQuote]) // 直接使用基础依赖项
+  }, [
+    shouldShowQuote,
+    fromToken.address,
+    toToken.address,
+    fromToken.decimals,
+    toToken.decimals,
+    slippage,
+    primaryPoolIndex,
+  ])
   // 1 ETH <==> 2000USDT slippage = 1%
   // 1 ETH 至少兑换出来 2000 * (1 - 0.01) = 1980USDT
 
   const handleFromAmountChange = (value: string) => {
     const parsed = parseInputAmount(value)
     setFromAmount(parsed)
+    if (!parsed || !Number.isFinite(parseFloat(parsed)) || parseFloat(parsed) <= 0) {
+      setToAmount('')
+      setQuoteError(null)
+    }
   }
 
   const handleSwapTokens = () => {
@@ -444,36 +458,43 @@ export default function SwapInterface() {
     }
   }, [isConfirmed, refetchAllowance])
 
-  // 当 pool 关系或代币列表变化时，自动修正不合法的交易对组合。
+  // 当 pool 关系或代币列表变化时，统一修正交易对，避免 from/to 两个 effect 互相触发导致来回切换。
   useEffect(() => {
-    if (fromToken.address.toLowerCase() === toToken.address.toLowerCase()) {
-      const firstValidTo = toTokenOptions.find(
-        (token) => token.address.toLowerCase() !== fromToken.address.toLowerCase()
+    const fromAddr = fromToken.address.toLowerCase()
+    const toAddr = toToken.address.toLowerCase()
+
+    const isCurrentToValid = toTokenOptions.some(
+      (token) => token.address.toLowerCase() === toAddr
+    )
+    const canUseDifferentTo = toTokenOptions.some(
+      (token) => token.address.toLowerCase() !== fromAddr
+    )
+
+    // 优先只修正 toToken，保证 fromToken 稳定，避免双向 effect 打架。
+    if (fromAddr === toAddr || !isCurrentToValid) {
+      const nextTo = toTokenOptions.find(
+        (token) => token.address.toLowerCase() !== fromAddr
       )
-      if (firstValidTo) {
-        setToToken(firstValidTo)
+      if (nextTo && nextTo.address.toLowerCase() !== toAddr) {
+        setToToken(nextTo)
       }
       return
     }
 
-    const isCurrentToValid = toTokenOptions.some(
-      (token) => token.address.toLowerCase() === toToken.address.toLowerCase()
-    )
-    if (!isCurrentToValid) {
-      const nextTo = toTokenOptions[0]
-      if (nextTo) setToToken(nextTo)
-    }
-  }, [fromToken.address, toToken.address, toTokenOptions])
-
-  useEffect(() => {
+    // 如果 from 在当前 to 的可选列表里无效，仅在确实有其它合法 to 可选时再修正 from。
+    if (!canUseDifferentTo) return
     const isCurrentFromValid = fromTokenOptions.some(
-      (token) => token.address.toLowerCase() === fromToken.address.toLowerCase()
+      (token) => token.address.toLowerCase() === fromAddr
     )
     if (!isCurrentFromValid) {
-      const nextFrom = fromTokenOptions[0]
-      if (nextFrom) setFromToken(nextFrom)
+      const nextFrom = fromTokenOptions.find(
+        (token) => token.address.toLowerCase() !== toAddr
+      )
+      if (nextFrom && nextFrom.address.toLowerCase() !== fromAddr) {
+        setFromToken(nextFrom)
+      }
     }
-  }, [fromToken.address, fromTokenOptions])
+  }, [fromToken.address, toToken.address, toTokenOptions, fromTokenOptions])
 
   const TokenSelector = ({ 
     selectedToken, 
@@ -675,17 +696,17 @@ export default function SwapInterface() {
           </div>
           <div className="flex items-center justify-between p-4 bg-muted rounded-lg">
             <div className="text-2xl font-medium text-foreground flex-1">
-              {isQuoting ? (
+              {shouldShowQuote && isQuoting ? (
                 <div className="flex items-center">
                   <Clock className="w-4 h-4 animate-spin mr-2 text-muted-foreground" />
                   <span className="text-muted-foreground">获取报价中...</span>
                 </div>
-              ) : quoteError ? (
+              ) : displayQuoteError ? (
                 <div className="text-sm text-red-600 dark:text-red-400">
-                  {quoteError}
+                  {displayQuoteError}
                 </div>
               ) : (
-                toAmount || '0'
+                displayToAmount || '0'
               )}
             </div>
             <TokenSelector
@@ -695,9 +716,9 @@ export default function SwapInterface() {
               options={toTokenOptions}
             />
           </div>
-          {quoteError && (
+          {displayQuoteError && (
             <div className="mt-2 text-xs text-red-600 dark:text-red-400">
-              ⚠️ {quoteError}
+              ⚠️ {displayQuoteError}
             </div>
           )}
           {/* {isSimulated && (
@@ -739,9 +760,12 @@ export default function SwapInterface() {
           )}
 
           {/* Price Info */}
-          {fromAmount && toAmount && parseFloat(fromAmount) > 0 && parseFloat(toAmount) > 0 && (
+          {shouldShowQuote &&
+            displayToAmount &&
+            parseFloat(displayToAmount) > 0 && (
             <div className="text-xs text-muted-foreground text-center">
-              1 {fromToken.symbol} ≈ {(parseFloat(toAmount) / parseFloat(fromAmount)).toFixed(6)} {toToken.symbol}
+              1 {fromToken.symbol} ≈{' '}
+              {(parseFloat(displayToAmount) / parseFloat(fromAmount)).toFixed(6)} {toToken.symbol}
             </div>
           )}
         </div>

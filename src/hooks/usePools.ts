@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { useReadContract, useAccount } from 'wagmi'
 import { formatUnits } from 'viem'
 import { contractConfig } from '@/lib/contracts'
@@ -35,18 +35,36 @@ interface RawPoolData {
   pool: string
   token0: string
   token1: string
-  index: number
+  index: number | bigint
   fee: number
   liquidity: string | bigint
   sqrtPriceX96: string | bigint
   tick: number
 }
 
+/** 仅随链上池子实质内容变化而变，避免 wagmi 每次返回新引用时触发无限 setState。 */
+function poolsDataChainKey(poolsData: unknown): string {
+  if (!poolsData || !Array.isArray(poolsData)) return ''
+  return JSON.stringify(
+    (poolsData as RawPoolData[]).map((p) => {
+      const liq = (typeof p.liquidity === 'bigint' ? p.liquidity : BigInt(String(p.liquidity ?? 0))).toString()
+      const sqrt = typeof p.sqrtPriceX96 === 'bigint' ? p.sqrtPriceX96.toString() : String(p.sqrtPriceX96 ?? '0')
+      return [
+        String(p.pool).toLowerCase(),
+        p.token0.toLowerCase(),
+        p.token1.toLowerCase(),
+        Number(p.index),
+        p.fee,
+        liq,
+        sqrt,
+        p.tick,
+      ]
+    })
+  )
+}
+
 export const usePools = () => {
   const { isConnected } = useAccount()
-  const [pools, setPools] = useState<PoolInfo[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
 
   // 获取所有池子
   const { data: poolsData, isLoading: poolsLoading, error: poolsError } = useReadContract({
@@ -57,129 +75,75 @@ export const usePools = () => {
     },
   })
 
-  console.log('poolsData', poolsData)
+  const poolsChainKey = useMemo(() => poolsDataChainKey(poolsData), [poolsData])
 
-  // 准备池子地址列表用于批量获取数据
-  const poolAddresses = poolsData && Array.isArray(poolsData) 
-    ? (poolsData as RawPoolData[]).map(pool => ({
-        pool: pool.pool,
-        token0: pool.token0,
-        token1: pool.token1,
-      }))
-    : []
-
-  // 获取所有池子的真实链上数据
-  // const { poolsData: realPoolsData, loading: poolDataLoading, error: poolDataError } = useMultiplePoolsData(poolAddresses)
-
-  // 处理池子数据
-  useEffect(() => {
-    if (poolsData && Array.isArray(poolsData)) {
-      try {
-        const processedPools = (poolsData as RawPoolData[]).map((pool) => {
-          // 获取代币信息
-          const getTokenInfo = (address: string) => {
-            const token = Object.values(TOKENS).find(
-              t => t.address.toLowerCase() === address.toLowerCase()
-            )
-            return token || { symbol: 'UNKNOWN', name: 'Unknown Token' }
-          }
-
-          const token0Info = getTokenInfo(pool.token0)
-          const token1Info = getTokenInfo(pool.token1)
-
-          // 格式化流动性
-          const liquidity = formatUnits(BigInt(pool.liquidity || '0'), 18)
-
-          // 计算费率百分比
-          const feePercent = (pool.fee / 10000).toFixed(2) + '%'
-
-          // 获取真实的链上数据
-          // const realData = realPoolsData[pool.pool]
-          
-          let tvl = '$0'
-          let volume24h = '$0'
-          const token0Balance = '0'
-          const token1Balance = '0'
-          let tvlUSD = 0
-          let volumeUSD = 0
-          const feesUSD = 0
-
-          // if (realData) {
-          //   // 使用真实的链上数据
-          //   tvlUSD = realData.tvlUSD
-          //   volumeUSD = realData.volumeUSD
-          //   feesUSD = realData.feesUSD
-          //   token0Balance = realData.token0Balance
-          //   token1Balance = realData.token1Balance
-
-          //   // 格式化显示
-          //   tvl = tvlUSD >= 1000000 
-          //     ? `$${(tvlUSD / 1000000).toFixed(2)}M`
-          //     : tvlUSD >= 1000
-          //     ? `$${(tvlUSD / 1000).toFixed(2)}K`
-          //     : `$${tvlUSD.toFixed(2)}`
-
-          //   volume24h = volumeUSD >= 1000000
-          //     ? `$${(volumeUSD / 1000000).toFixed(2)}M`
-          //     : volumeUSD >= 1000
-          //     ? `$${(volumeUSD / 1000).toFixed(2)}K`
-          //     : `$${volumeUSD.toFixed(2)}`
-          // } else 
-          // if (!poolDataLoading) {
-            // 如果没有获取到真实数据且不在加载中，使用模拟数据
-            const mockTvl = (Math.random() * 500000 + 50000)
-            const mockVolume = (Math.random() * 50000 + 5000)
-            
-            tvlUSD = mockTvl
-            volumeUSD = mockVolume
-            
-            tvl = `$${mockTvl.toFixed(0)}`
-            volume24h = `$${mockVolume.toFixed(0)}`
-          // }
-
-          return {
-            pool: pool.pool,
-            token0: pool.token0,
-            token1: pool.token1,
-            index: pool.index,
-            fee: pool.fee,
-            liquidity,
-            sqrtPriceX96: pool.sqrtPriceX96?.toString() || '0',
-            tick: pool.tick,
-            token0Symbol: token0Info.symbol,
-            token1Symbol: token1Info.symbol,
-            token0Name: token0Info.name,
-            token1Name: token1Info.name,
-            tvl,
-            volume24h,
-            pair: `${token0Info.symbol}/${token1Info.symbol}`,
-            feePercent,
-            token0Balance,
-            token1Balance,
-            tvlUSD,
-            volumeUSD,
-            feesUSD,
-          }
-        })
-
-        setPools(processedPools)
-        setError(null)
-      } catch (err) {
-        console.error('处理池子数据时出错:', err)
-        setError('处理池子数据失败')
-      }
+  const { pools, mapError } = useMemo(() => {
+    if (!poolsData || !Array.isArray(poolsData)) {
+      return { pools: [] as PoolInfo[], mapError: null as string | null }
     }
-    setLoading(poolsLoading)
-  }, [poolsData, poolsLoading])
+    try {
+      const processedPools = (poolsData as RawPoolData[]).map((pool) => {
+        const getTokenInfo = (address: string) => {
+          const token = Object.values(TOKENS).find((t) => t.address.toLowerCase() === address.toLowerCase())
+          return token || { symbol: 'UNKNOWN', name: 'Unknown Token' }
+        }
 
-  // 处理错误
+        const token0Info = getTokenInfo(pool.token0)
+        const token1Info = getTokenInfo(pool.token1)
+
+        const liquidity = formatUnits(BigInt(pool.liquidity || '0'), 18)
+        const feePercent = (pool.fee / 10000).toFixed(2) + '%'
+
+        const tvl = '$0'
+        const volume24h = '$0'
+        const token0Balance = '0'
+        const token1Balance = '0'
+        const tvlUSD = 0
+        const volumeUSD = 0
+        const feesUSD = 0
+
+        return {
+          pool: pool.pool,
+          token0: pool.token0,
+          token1: pool.token1,
+          index: Number(pool.index),
+          fee: pool.fee,
+          liquidity,
+          sqrtPriceX96: pool.sqrtPriceX96?.toString() || '0',
+          tick: pool.tick,
+          token0Symbol: token0Info.symbol,
+          token1Symbol: token1Info.symbol,
+          token0Name: token0Info.name,
+          token1Name: token1Info.name,
+          tvl,
+          volume24h,
+          pair: `${token0Info.symbol}/${token1Info.symbol}`,
+          feePercent,
+          token0Balance,
+          token1Balance,
+          tvlUSD,
+          volumeUSD,
+          feesUSD,
+        }
+      })
+
+      return { pools: processedPools, mapError: null }
+    } catch (err) {
+      console.error('处理池子数据时出错:', err)
+      return { pools: [] as PoolInfo[], mapError: '处理池子数据失败' }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- poolsChainKey 已序列化 poolsData 内容；避免 unstable 引用导致死循环
+  }, [poolsChainKey])
+
   useEffect(() => {
     if (poolsError) {
       console.error('获取池子数据出错:', poolsError)
-      setError('获取池子数据失败')
-      setLoading(false)
     }
   }, [poolsError])
+
+  const error =
+    poolsError != null ? '获取池子数据失败' : mapError
+  const loading = Boolean(isConnected && poolsLoading)
 
   // 计算总计数据
   const totalStats = {
@@ -195,8 +159,7 @@ export const usePools = () => {
     error,
     totalStats,
     refetch: () => {
-      setLoading(true)
-      // 重新获取数据的逻辑会自动触发，因为 useReadContract 会监听变化
+      // 重新拉取由 wagmi / tanstack query 管理；如需强制刷新可在此接入 queryClient.invalidateQueries
     },
   }
 } 
