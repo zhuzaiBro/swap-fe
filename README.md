@@ -1,6 +1,6 @@
 # MetaNodeSwap DEX 前端
 
-基于 Next.js 和 Tailwind CSS 构建的去中心化交易所前端，类似于 Uniswap 的用户界面。
+基于 Next.js 和 Tailwind CSS 构建的去中心化交易所前端，类似于 Uniswap 的用户界面
 
 ## 功能特性
 
